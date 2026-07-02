@@ -1,0 +1,299 @@
+# ABOUTME: Reusable workflow that packages a Temporal skill repo (as a ZIP artifact) and, if the version
+# ABOUTME: in SKILL.md has been bumped, creates a GitHub Release and syncs the skill contents to three
+# ABOUTME: plugin repos (cursor-temporal-plugin, codex-temporal-plugin, claude-temporal-plugin) via PRs.
+# ABOUTME: The skill name is derived from the CALLER repo's name with the leading "skill-" prefix removed,
+# ABOUTME: so nothing about the skill name is hardcoded. Callers invoke this via `uses:` (see README).
+# ABOUTME: Required secrets (used only by the sync job for cross-repo PRs), passed by the caller:
+# ABOUTME:   SKILL_T_DEV_APP_ID — the GitHub App's ID
+# ABOUTME:   SKILL_T_DEV_KEY    — the GitHub App's private key
+# ABOUTME: The app must be installed on the three plugin repos with Contents (write) and Pull Requests (write).
+
+name: Package and Sync Skill (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      excludes:
+        description: >-
+          Space-separated blacklist of files/dirs NOT part of the skill.
+          Everything else in the caller repo root is packaged and synced.
+        type: string
+        default: ".git .github .gitignore .DS_Store *.zip README.md"
+    secrets:
+      SKILL_T_DEV_APP_ID:
+        description: GitHub App ID used to open cross-repo sync PRs.
+        required: true
+      SKILL_T_DEV_KEY:
+        description: GitHub App private key used to open cross-repo sync PRs.
+        required: true
+
+env:
+  # Blacklist comes from the caller (or the input default). Everything else in
+  # the repo root is packaged into the ZIP and synced to the plugin repos, so
+  # new skill content (agents/, scripts/, etc.) is picked up automatically —
+  # callers only override `excludes` to keep something OUT.
+  SKILL_EXCLUDES: ${{ inputs.excludes }}
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      released: ${{ steps.tag_check.outputs.exists == 'false' }}
+      skill_name: ${{ steps.meta.outputs.skill_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute skill name from repo name
+        id: meta
+        run: |
+          # Derive the skill name from the caller repository's name, dropping the
+          # leading "skill-" prefix (e.g. skill-temporal-cloud-setup -> temporal-cloud-setup).
+          # In a reusable workflow, GITHUB_REPOSITORY is the CALLER repo.
+          skill_name="${GITHUB_REPOSITORY##*/}"
+          skill_name="${skill_name#skill-}"
+          echo "skill_name=$skill_name" >> "$GITHUB_OUTPUT"
+          echo "Skill name: $skill_name"
+
+      - name: Read version from SKILL.md
+        id: version
+        run: |
+          version=$(grep '^version:' SKILL.md | sed 's/version:[[:space:]]*//')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: tag_check
+        run: |
+          if git rev-parse "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package skill
+        run: |
+          # Zip the whole repo except the blacklist (zip's * matches / too,
+          # so "$e/*" covers directory contents at any depth).
+          exclude_args=()
+          for e in $SKILL_EXCLUDES; do
+            exclude_args+=(-x "$e" -x "$e/*")
+          done
+          zip -r "${{ steps.meta.outputs.skill_name }}-skill.zip" . "${exclude_args[@]}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.skill_name }}-skill
+          path: ${{ steps.meta.outputs.skill_name }}-skill.zip
+
+      - name: Create release
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          files: ${{ steps.meta.outputs.skill_name }}-skill.zip
+          generate_release_notes: true
+
+  sync:
+    needs: package
+    if: needs.package.outputs.released == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      # contents: write is required by the POST /releases/generate-notes endpoint,
+      # even though it only returns text and doesn't actually write anything.
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # {name} is substituted with the derived skill name at step time
+          # (matrix values are evaluated before steps run, so ${{ }} can't
+          # reach the skill name here — we do the substitution ourselves).
+          - repo: temporalio/cursor-temporal-plugin
+            target_path: skills/{name}
+          - repo: temporalio/codex-temporal-plugin
+            target_path: plugins/temporal/skills/{name}
+          - repo: temporalio/claude-temporal-plugin
+            target_path: skills/{name}
+
+    steps:
+      - name: Generate token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.SKILL_T_DEV_APP_ID }}
+          private-key: ${{ secrets.SKILL_T_DEV_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Checkout target repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ matrix.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: target-repo
+
+      - name: Compute target path
+        run: |
+          # Substitute {name} in the matrix's target_path template with the
+          # derived skill name.
+          name="${{ needs.package.outputs.skill_name }}"
+          target_path="${{ matrix.target_path }}"
+          target_path="${target_path//\{name\}/$name}"
+          echo "target_path=$target_path" >> "$GITHUB_ENV"
+          echo "Target path: $target_path"
+
+      - name: Sync skill contents
+        run: |
+          NAME="${{ needs.package.outputs.skill_name }}"
+          BRANCH="sync/${NAME}-skill"
+
+          git -C target-repo config user.name "github-actions[bot]"
+          git -C target-repo config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create or reset the sync branch based on current main.
+          # -B ensures the branch always starts from main's tip, even if a
+          # stale remote branch exists from a previously merged PR.
+          git -C target-repo checkout -B "$BRANCH" origin/main
+
+          # Mirror the source repo (minus the blacklist) into the skill's
+          # target path. --delete removes files that no longer exist in source,
+          # so renamed/removed skill files don't linger. target-repo is the
+          # target checkout living under the source root, so exclude it too.
+          exclude_args=()
+          for e in $SKILL_EXCLUDES; do
+            exclude_args+=(--exclude="$e")
+          done
+          dest="target-repo/${target_path}"
+          mkdir -p "$dest"
+          rsync -a --delete "${exclude_args[@]}" --exclude=target-repo ./ "$dest/"
+
+          # Stage the target path (git add records deletions too).
+          git -C target-repo add "${target_path}"
+          if git -C target-repo diff --cached --quiet; then
+            echo "no_changes=true" >> "$GITHUB_ENV"
+            echo "No changes to sync"
+          else
+            echo "no_changes=false" >> "$GITHUB_ENV"
+            version="${{ needs.package.outputs.tag }}"
+            git -C target-repo commit -m "sync ${NAME} skill ${version} from source repo"
+            git -C target-repo push --force origin "$BRANCH"
+          fi
+
+      - name: Build changelog
+        if: env.no_changes == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_tag="${{ needs.package.outputs.tag }}"
+
+          # Determine the base for the changelog: the version currently on the
+          # target repo's main branch. This represents what was last merged, so
+          # the changelog spans every release since then — correctly accumulating
+          # unmerged versions if a prior sync PR is still open.
+          #
+          # Read the old SKILL.md from git (it's been overwritten on disk by the
+          # sync step) via `git show origin/main:...`.
+          target_version=$(git -C target-repo show "origin/main:${target_path}/SKILL.md" 2>/dev/null \
+            | grep '^version:' | sed 's/version:[[:space:]]*//' || echo "")
+
+          if [ -n "$target_version" ]; then
+            base_tag="v${target_version}"
+          else
+            base_tag=""
+          fi
+
+          # The target repo's recorded version may not correspond to an
+          # actual tag in this source repo (e.g. the target was last
+          # updated from a different repo, or a tag was never published
+          # for that version). If the tag doesn't exist locally, find the
+          # most recent tag that's an ancestor of HEAD and predates the
+          # current tag; if nothing matches, leave base_tag empty so the
+          # fallback path runs.
+          if [ -n "$base_tag" ] && ! git rev-parse --verify --quiet "refs/tags/${base_tag}" >/dev/null; then
+            echo "Base tag ${base_tag} does not exist in this repo; searching for closest preceding tag"
+            fallback_tag=$(git tag --sort=-v:refname | awk -v cur="$current_tag" '$0 != cur' | head -1 || true)
+            if [ -n "$fallback_tag" ]; then
+              echo "Using ${fallback_tag} as base tag instead"
+              base_tag="$fallback_tag"
+            else
+              base_tag=""
+            fi
+          fi
+
+          # Prefer GitHub's auto-generated notes for the range (nicely formatted
+          # with PR links and contributors). Fall back to git log if unavailable.
+          echo "Base tag: ${base_tag:-<none>} / Current tag: ${current_tag}"
+          if [ -n "$base_tag" ]; then
+            if notes=$(gh api \
+                --method POST \
+                "/repos/${{ github.repository }}/releases/generate-notes" \
+                -f tag_name="${current_tag}" \
+                -f previous_tag_name="${base_tag}" \
+                --jq '.body') && [ -n "$notes" ]; then
+              echo "Using auto-generated release notes"
+              echo "$notes" > /tmp/changelog.md
+            else
+              echo "generate-notes API call failed or empty; falling back to git log"
+              git log --oneline "${base_tag}..HEAD" > /tmp/changelog.md \
+                || git log --oneline -20 > /tmp/changelog.md
+            fi
+          else
+            echo "No base tag found; using last 20 commits"
+            git log --oneline -20 > /tmp/changelog.md
+          fi
+
+      - name: Create or update PR
+        if: env.no_changes == 'false'
+        working-directory: target-repo
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          NAME="${{ needs.package.outputs.skill_name }}"
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          BRANCH="sync/${NAME}-skill"
+          version="${{ needs.package.outputs.tag }}"
+          changelog=$(cat /tmp/changelog.md)
+
+          # Check if a PR already exists from this branch
+          existing_pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+
+          if [ -n "$existing_pr" ]; then
+            echo "PR #${existing_pr} already exists — updated by the force-push"
+            gh pr edit "$existing_pr" \
+              --title "Sync ${NAME} skill ${version}" \
+              --body "Automated sync of the ${NAME} skill ${version} from [${REPO_NAME}](https://github.com/${{ github.repository }}).
+
+          This PR was updated automatically by the [sync workflow](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+
+          ## Changelog
+          ${changelog}"
+            gh pr comment "$existing_pr" --body "Updated to ${version} from [${REPO_NAME}](https://github.com/${{ github.repository }})."
+            pr_url=$(gh pr view "$existing_pr" --json url --jq '.url')
+            echo "### ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Updated [PR #${existing_pr}](${pr_url})" >> "$GITHUB_STEP_SUMMARY"
+          else
+            pr_url=$(gh pr create \
+              --title "Sync ${NAME} skill ${version}" \
+              --body "Automated sync of the ${NAME} skill ${version} from [${REPO_NAME}](https://github.com/${{ github.repository }}).
+
+          This PR was created automatically by the [sync workflow](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+
+          ## Changelog
+          ${changelog}")
+            echo "### ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Created ${pr_url}" >> "$GITHUB_STEP_SUMMARY"
+          fi
