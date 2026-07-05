@@ -23,7 +23,7 @@ jobs:
       contents: write
     secrets: inherit
     # with:
-    #   excludes: ".git .github .gitignore .DS_Store *.zip README.md"
+    #   includes: "SKILL.md agents references scripts"
 ```
 
 That's the entire caller. The reusable workflow derives the skill name from the
@@ -35,7 +35,7 @@ plugin repos.
 
 | Input      | Default                                              | Description |
 |------------|------------------------------------------------------|-------------|
-| `excludes` | `.git .github .gitignore .DS_Store *.zip README.md`  | Space-separated blacklist of paths NOT part of the skill. Everything else in the repo root is packaged and synced. Override only to keep additional things out. |
+| `includes` | `SKILL.md agents references scripts` | Space-separated whitelist of paths that ARE part of the skill. Only these are packaged and synced; everything else is ignored. Missing entries are skipped, so the default can list optional dirs. Override to add new skill content. |
 
 ### Secrets
 

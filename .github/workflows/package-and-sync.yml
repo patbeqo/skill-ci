@@ -13,12 +13,13 @@ name: Package and Sync Skill (reusable)
 on:
   workflow_call:
     inputs:
-      excludes:
+      includes:
         description: >-
-          Space-separated blacklist of files/dirs NOT part of the skill.
-          Everything else in the caller repo root is packaged and synced.
+          Space-separated whitelist of files/dirs that ARE part of the skill.
+          Only these paths in the caller repo root are packaged and synced;
+          everything else is ignored. Non-existent entries are skipped.
         type: string
-        default: ".git .github .gitignore .DS_Store *.zip README.md"
+        default: "SKILL.md agents references scripts"
     secrets:
       SKILL_T_DEV_APP_ID:
         description: GitHub App ID used to open cross-repo sync PRs.
@@ -28,11 +29,12 @@ on:
         required: true
 
 env:
-  # Blacklist comes from the caller (or the input default). Everything else in
-  # the repo root is packaged into the ZIP and synced to the plugin repos, so
-  # new skill content (agents/, scripts/, etc.) is picked up automatically —
-  # callers only override `excludes` to keep something OUT.
-  SKILL_EXCLUDES: ${{ inputs.excludes }}
+  # Whitelist comes from the caller (or the input default). Only these paths in
+  # the repo root are packaged into the ZIP and synced to the plugin repos, so
+  # anything not listed (LICENSE, README.md, CI config, dotfiles, etc.) is
+  # ignored — callers override `includes` to add new skill content (a new dir,
+  # an extra top-level file). Entries that don't exist are silently skipped.
+  SKILL_INCLUDES: ${{ inputs.includes }}
 
 jobs:
   package:
@@ -80,13 +82,22 @@ jobs:
 
       - name: Package skill
         run: |
-          # Zip the whole repo except the blacklist (zip's * matches / too,
-          # so "$e/*" covers directory contents at any depth).
-          exclude_args=()
-          for e in $SKILL_EXCLUDES; do
-            exclude_args+=(-x "$e" -x "$e/*")
+          # Zip only the whitelisted paths (zip -r recurses into any dirs).
+          # Skip entries that don't exist so the whitelist can list optional
+          # paths without breaking repos that omit them.
+          include_args=()
+          for i in $SKILL_INCLUDES; do
+            if [ -e "$i" ]; then
+              include_args+=("$i")
+            else
+              echo "Skipping missing include: $i"
+            fi
           done
-          zip -r "${{ steps.meta.outputs.skill_name }}-skill.zip" . "${exclude_args[@]}"
+          if [ ${#include_args[@]} -eq 0 ]; then
+            echo "No whitelisted paths found to package" >&2
+            exit 1
+          fi
+          zip -r "${{ steps.meta.outputs.skill_name }}-skill.zip" "${include_args[@]}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -169,17 +180,20 @@ jobs:
           # stale remote branch exists from a previously merged PR.
           git -C target-repo checkout -B "$BRANCH" origin/main
 
-          # Mirror the source repo (minus the blacklist) into the skill's
-          # target path. --delete removes files that no longer exist in source,
-          # so renamed/removed skill files don't linger. target-repo is the
-          # target checkout living under the source root, so exclude it too.
-          exclude_args=()
-          for e in $SKILL_EXCLUDES; do
-            exclude_args+=(--exclude="$e")
+          # Mirror only the whitelisted paths into the skill's target path.
+          # --delete removes files in the target that aren't whitelisted in
+          # source, so renamed/removed skill files don't linger. We include
+          # each whitelisted entry (and, if it's a dir, everything under it via
+          # /***) then exclude everything else. A file-only entry's /*** rule is
+          # harmless. This also naturally excludes target-repo, .git, CI config,
+          # etc. since they aren't whitelisted.
+          include_args=()
+          for i in $SKILL_INCLUDES; do
+            include_args+=(--include="/$i" --include="/$i/***")
           done
           dest="target-repo/${target_path}"
           mkdir -p "$dest"
-          rsync -a --delete "${exclude_args[@]}" --exclude=target-repo ./ "$dest/"
+          rsync -a --delete "${include_args[@]}" --exclude='*' ./ "$dest/"
 
           # Stage the target path (git add records deletions too).
           git -C target-repo add "${target_path}"
