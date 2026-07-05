@@ -364,8 +364,7 @@ jobs:
           ${changelog}"
             gh pr comment "$existing_pr" --body "Updated to ${version} from [${REPO_NAME}](https://github.com/${{ github.repository }})."
             pr_url=$(gh pr view "$existing_pr" --json url --jq '.url')
-            echo "### ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
-            echo "Updated [PR #${existing_pr}](${pr_url})" >> "$GITHUB_STEP_SUMMARY"
+            pr_action="updated"
           else
             pr_url=$(gh pr create \
               --title "Sync ${NAME} skill ${version}" \
@@ -375,6 +374,120 @@ jobs:
 
           ## Changelog
           ${changelog}")
-            echo "### ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
-            echo "Created ${pr_url}" >> "$GITHUB_STEP_SUMMARY"
+            pr_action="created"
           fi
+
+          # Expose for the record/summary steps below.
+          echo "PR_URL=$pr_url" >> "$GITHUB_ENV"
+          echo "PR_ACTION=$pr_action" >> "$GITHUB_ENV"
+
+          # Prominent per-job summary so the link is obvious on this job's page.
+          {
+            echo "## ✅ ${pr_action^} sync PR — \`${{ matrix.repo }}\`"
+            echo ""
+            echo "### 👉 [Review & merge this PR](${pr_url})"
+            echo ""
+            echo "\`${pr_url}\`"
+            echo ""
+            echo "> **Next step:** merge the PR above to publish \`${NAME}\` ${version} to \`${{ matrix.repo }}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record PR result
+        if: always()
+        env:
+          MATRIX_REPO: ${{ matrix.repo }}
+        run: |
+          # Write one machine-readable record per target repo so the final
+          # `summary` job can aggregate all PR links into a single obvious list.
+          # Fields: repo|status|url  (status: created|updated|nochanges|failed)
+          mkdir -p pr-results
+          status="${PR_ACTION:-}"
+          if [ "${{ env.no_changes }}" = "true" ]; then
+            status="nochanges"
+          elif [ -z "$status" ]; then
+            # PR step didn't run / didn't finish (e.g. sync failed).
+            status="failed"
+          fi
+          safe="${MATRIX_REPO//\//-}"
+          echo "${MATRIX_REPO}|${status}|${PR_URL:-}" > "pr-results/${safe}.txt"
+
+      - name: Upload PR result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-result-${{ strategy.job-index }}
+          path: pr-results/
+          retention-days: 1
+
+  # Consolidate the per-target results into ONE obvious summary so the user sees
+  # every PR link and the "merge these" call-to-action in a single place, rather
+  # than hunting through the three matrix jobs.
+  summary:
+    needs: [package, sync]
+    if: always() && needs.sync.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download PR results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pr-result-*
+          path: pr-results
+          merge-multiple: true
+
+      - name: Write consolidated summary
+        env:
+          NAME: ${{ needs.package.outputs.skill_name }}
+          VERSION: ${{ needs.package.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          created_updated=0
+          rows=""
+          # Each file is one line: repo|status|url
+          for f in pr-results/*.txt; do
+            [ -e "$f" ] || continue
+            IFS='|' read -r repo status url < "$f"
+            case "$status" in
+              created)   icon="🆕"; label="Created";  action="**MERGE**" ;;
+              updated)   icon="🔄"; label="Updated";  action="**MERGE**" ;;
+              nochanges) icon="⏸️"; label="No changes"; action="—" ;;
+              *)         icon="❌"; label="Failed";   action="check logs" ;;
+            esac
+            if [ "$status" = "created" ] || [ "$status" = "updated" ]; then
+              created_updated=$((created_updated + 1))
+              link="[Open PR ↗](${url})"
+            elif [ -n "$url" ]; then
+              link="[link](${url})"
+            else
+              link="—"
+            fi
+            rows="${rows}| ${icon} \`${repo}\` | ${label} | ${link} | ${action} |"$'\n'
+          done
+
+          {
+            if [ "$created_updated" -gt 0 ]; then
+              echo "# 🚀 ${NAME} ${VERSION} — action required"
+              echo ""
+              echo "## ⚠️ NEXT STEP: merge the ${created_updated} pull request(s) below to publish this skill."
+              echo ""
+              echo "The release is packaged, but it is **not live in the plugin repos until you merge these PRs.**"
+            else
+              echo "# ${NAME} ${VERSION} — nothing to merge"
+              echo ""
+              echo "No sync PRs were created (targets already up to date, or the sync did not run)."
+            fi
+            echo ""
+            echo "| Target repo | Status | Pull request | Action |"
+            echo "|-------------|--------|--------------|--------|"
+            printf '%s' "$rows"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Also echo the links into the job log for anyone reading raw output.
+          echo "::notice title=Merge these sync PRs::${created_updated} PR(s) awaiting merge for ${NAME} ${VERSION}"
+          for f in pr-results/*.txt; do
+            [ -e "$f" ] || continue
+            IFS='|' read -r repo status url < "$f"
+            if [ "$status" = "created" ] || [ "$status" = "updated" ]; then
+              echo "  -> ${repo}: ${url}"
+            fi
+          done
