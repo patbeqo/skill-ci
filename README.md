@@ -52,6 +52,11 @@ plugin repos. There are two ways to cut a release:
 | `includes` | `SKILL.md agents references scripts` | Space-separated whitelist of paths that ARE part of the skill. Only these are packaged and synced; everything else is ignored. Missing entries are skipped, so the default can list optional dirs. Override to add new skill content. |
 | `bump`     | `""` (empty)                         | One-click release: `patch`, `minor`, or `major`. When set, rewrites `SKILL.md`'s version and pushes the bump to the default branch before releasing. Empty (push events) => release only on a manual version change. Requires `RELEASE_SSH_KEY`. |
 
+Per-target exception: `agents/openai.yaml` configures Codex, so it is synced only
+to `codex-temporal-plugin` — the Cursor and Claude plugin repos never receive it
+(and it is removed from them if an earlier sync had copied it there). It is still
+included in the release ZIP.
+
 ### Secrets
 
 `secrets: inherit` passes these through from the caller (set them as

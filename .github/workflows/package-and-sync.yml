@@ -5,6 +5,7 @@
 # ABOUTME: `bump` input (patch/minor/major) that rewrites SKILL.md, pushes the bump to main, then releases.
 # ABOUTME: The skill name is derived from the CALLER repo's name with the leading "skill-" prefix removed,
 # ABOUTME: so nothing about the skill name is hardcoded. Callers invoke this via `uses:` (see README).
+# ABOUTME: agents/openai.yaml is Codex-specific and is synced only to codex-temporal-plugin.
 # ABOUTME: Secrets (passed by the caller, typically via `secrets: inherit`):
 # ABOUTME:   SKILL_T_DEV_APP_ID — GitHub App ID   (sync job: cross-repo PRs)
 # ABOUTME:   SKILL_T_DEV_KEY    — GitHub App key   (sync job: cross-repo PRs)
@@ -192,12 +193,19 @@ jobs:
           # {name} is substituted with the derived skill name at step time
           # (matrix values are evaluated before steps run, so ${{ }} can't
           # reach the skill name here — we do the substitution ourselves).
+          #
+          # `excludes` is a space-separated list of whitelisted paths to leave
+          # OUT of this particular target. agents/openai.yaml configures Codex,
+          # so it's synced only to the codex plugin repo.
           - repo: temporalio/cursor-temporal-plugin
             target_path: skills/{name}
+            excludes: agents/openai.yaml
           - repo: temporalio/codex-temporal-plugin
             target_path: plugins/temporal/skills/{name}
+            excludes: ""
           - repo: temporalio/claude-temporal-plugin
             target_path: skills/{name}
+            excludes: agents/openai.yaml
 
     steps:
       - name: Generate token from GitHub App
@@ -235,6 +243,8 @@ jobs:
           echo "Target path: $target_path"
 
       - name: Sync skill contents
+        env:
+          TARGET_EXCLUDES: ${{ matrix.excludes }}
         run: |
           NAME="${{ needs.package.outputs.skill_name }}"
           BRANCH="sync/${NAME}-skill"
@@ -254,13 +264,27 @@ jobs:
           # /***) then exclude everything else. A file-only entry's /*** rule is
           # harmless. This also naturally excludes target-repo, .git, CI config,
           # etc. since they aren't whitelisted.
+          #
+          # Per-target excludes come FIRST: rsync applies the first matching
+          # rule, so an exclude has to precede the --include that would
+          # otherwise pull the path in (e.g. agents/openai.yaml vs agents/***).
           include_args=()
+          for e in $TARGET_EXCLUDES; do
+            include_args+=(--exclude="/$e" --exclude="/$e/***")
+          done
           for i in $SKILL_INCLUDES; do
             include_args+=(--include="/$i" --include="/$i/***")
           done
           dest="target-repo/${target_path}"
           mkdir -p "$dest"
           rsync -a --delete "${include_args[@]}" --exclude='*' ./ "$dest/"
+
+          # rsync's --delete protects excluded paths on the receiving side, so
+          # remove them explicitly: a target that was synced before this
+          # exclusion existed must lose the file too.
+          for e in $TARGET_EXCLUDES; do
+            rm -rf "$dest/$e"
+          done
 
           # Stage the target path (git add records deletions too).
           git -C target-repo add "${target_path}"
