@@ -1,0 +1,121 @@
+name: Bump Skill
+
+on:
+  workflow_call:
+    inputs:
+      skill_repo:
+        required: true
+        type: string
+      package_strategy:
+        required: true
+        type: string
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    if: contains(fromJSON('["patch","minor","major"]'), inputs.package_strategy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout skill-ci repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Generate token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: ${{ inputs.skill_repo }}
+
+      - name: Checkout skill repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: temporalio/${{ inputs.skill_repo }}
+          path: ${{ inputs.skill_repo }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Get current tag
+        id: get_current_tag
+        working-directory: ${{ inputs.skill_repo }}
+        run: |
+          tag=$(git tag --sort=v:refname | tail -1)
+          echo "tag=${tag:-v0.0.0}" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version
+        id: bump_version
+        run: |
+          new_version=$(uv run bump_version.py "${{ inputs.skill_repo }}/SKILL.md" "${{ steps.get_current_tag.outputs.tag }}" "${{ inputs.package_strategy }}")
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Create PR
+        id: create_pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          path: ${{ inputs.skill_repo }}
+          add-paths: SKILL.md
+          branch: release/v${{ steps.bump_version.outputs.new_version }}
+          base: main
+          commit-message: Release v${{ steps.bump_version.outputs.new_version }}
+          title: Release v${{ steps.bump_version.outputs.new_version }}
+          body: Release v${{ steps.bump_version.outputs.new_version }}.
+
+      - name: Merge PR
+        id: merge_pr
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: temporalio/${{ inputs.skill_repo }}
+        run: |
+          set -euo pipefail
+          pr="${{ steps.create_pr.outputs.pull-request-number }}"
+          gh pr merge "$pr" --auto --squash || gh pr merge "$pr" --squash
+          while true; do
+            state="$(gh pr view "$pr" --json state --jq .state)"
+            case "$state" in
+              MERGED) exit 0 ;;
+              CLOSED)
+                echo "PR #$pr closed without merging" >&2
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+
+      - name: Tag new release
+        working-directory: ${{ inputs.skill_repo }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: temporalio/${{ inputs.skill_repo }}
+        run: |
+          set -euo pipefail
+          sha="$(gh pr view "${{ steps.create_pr.outputs.pull-request-number }}" --json mergeCommit --jq .mergeCommit.oid)"
+          git fetch origin "$sha"
+          git tag "v${{ steps.bump_version.outputs.new_version }}" "$sha"
+          git push origin "v${{ steps.bump_version.outputs.new_version }}"
+
+      - name: Summarize PR
+        if: success() && steps.create_pr.outputs.pull-request-url != ''
+        run: |
+          set -euo pipefail
+          {
+            echo "## Merged release PR — \`${{ inputs.skill_repo }}\` v${{ steps.bump_version.outputs.new_version }}"
+            echo ""
+            echo "[#${{ steps.create_pr.outputs.pull-request-number }}](${{ steps.create_pr.outputs.pull-request-url }})"
+          } >> "$GITHUB_STEP_SUMMARY"

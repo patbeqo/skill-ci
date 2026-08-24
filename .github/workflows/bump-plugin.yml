@@ -1,0 +1,251 @@
+name: Bump Plugin
+
+on:
+  workflow_call:
+    inputs:
+      plugin_repo:
+        required: true
+        type: string
+      package_strategy:
+        required: true
+        type: string
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  overlay:
+    if: contains(fromJSON('["patch","minor","major"]'), inputs.package_strategy)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        skill_repo: [skill-temporal-cloud-setup, skill-temporal-developer, skill-temporal-ops, skill-temporal-serverless]
+
+    steps:
+      - name: Resolve skill name
+        id: skill
+        run: |
+          name="${{ matrix.skill_repo }}"
+          echo "name=${name#skill-}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: ${{ matrix.skill_repo }}
+
+      - name: Checkout skill at rollback tag
+        if: ${{ github.event.inputs[format('{0}_package_strategy', matrix.skill_repo)] == 'rollback' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: temporalio/${{ matrix.skill_repo }}
+          ref: v${{ github.event.inputs[format('{0}_rollback_version', matrix.skill_repo)] }}
+          path: overlay
+          persist-credentials: false
+          sparse-checkout: |
+            SKILL.md
+            agents
+            references
+            scripts
+            assets
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve latest skill tag
+        if: ${{ github.event.inputs[format('{0}_package_strategy', matrix.skill_repo)] != 'rollback' }}
+        id: latest_tag
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          ref=$(gh api --paginate "repos/temporalio/${{ matrix.skill_repo }}/tags" --jq '.[].name' | sort -V | tail -1)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout skill at latest tag
+        if: ${{ github.event.inputs[format('{0}_package_strategy', matrix.skill_repo)] != 'rollback' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: temporalio/${{ matrix.skill_repo }}
+          ref: ${{ steps.latest_tag.outputs.ref }}
+          path: overlay
+          persist-credentials: false
+          sparse-checkout: |
+            SKILL.md
+            agents
+            references
+            scripts
+            assets
+          sparse-checkout-cone-mode: false
+
+      - name: Drop nested git metadata
+        run: rm -rf overlay/.git
+
+      - name: Upload skill overlay
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.skill.outputs.name }}
+          path: overlay
+          if-no-files-found: error
+          retention-days: 1
+
+  bump:
+    if: contains(fromJSON('["patch","minor","major"]'), inputs.package_strategy)
+    needs: overlay
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump_version.outputs.new_version }}
+      pull-request-number: ${{ steps.create_pr.outputs.pull-request-number }}
+      pull-request-url: ${{ steps.create_pr.outputs.pull-request-url }}
+
+    steps:
+      - name: Checkout skill-ci repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Generate token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: ${{ inputs.plugin_repo }}
+
+      - name: Checkout plugin repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: temporalio/${{ inputs.plugin_repo }}
+          path: ${{ inputs.plugin_repo }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Get current tag
+        id: get_current_tag
+        working-directory: ${{ inputs.plugin_repo }}
+        run: |
+          tag=$(git tag --sort=v:refname | tail -1)
+          echo "tag=${tag:-v0.0.0}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve plugin.json
+        id: plugin_json
+        run: |
+          set -euo pipefail
+          case "${{ inputs.plugin_repo }}" in
+            cursor-temporal-plugin) rel=".cursor-plugin/plugin.json" ;;
+            claude-temporal-plugin) rel=".claude-plugin/plugin.json" ;;
+            codex-temporal-plugin) rel="plugins/temporal/.codex-plugin/plugin.json" ;;
+            *) echo "Unknown plugin repo ${{ inputs.plugin_repo }}" >&2; exit 1 ;;
+          esac
+          echo "path=${{ inputs.plugin_repo }}/$rel" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version
+        id: bump_version
+        run: |
+          new_version=$(uv run bump_version.py "${{ steps.plugin_json.outputs.path }}" "${{ steps.get_current_tag.outputs.tag }}" "${{ inputs.package_strategy }}")
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Clear skill destinations
+        working-directory: ${{ inputs.plugin_repo }}
+        run: rm -rf "${{ inputs.plugin_repo == 'codex-temporal-plugin' && 'plugins/temporal/skills' || 'skills' }}"
+
+      - name: Download skill overlays
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ inputs.plugin_repo }}/${{ inputs.plugin_repo == 'codex-temporal-plugin' && 'plugins/temporal/skills' || 'skills' }}
+
+      - name: Omit Codex agent file
+        if: ${{ inputs.plugin_repo != 'codex-temporal-plugin' }}
+        working-directory: ${{ inputs.plugin_repo }}
+        run: rm -f skills/*/agents/openai.yaml
+
+      - name: Create PR
+        id: create_pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          path: ${{ inputs.plugin_repo }}
+          branch: release/v${{ steps.bump_version.outputs.new_version }}
+          base: main
+          commit-message: Release v${{ steps.bump_version.outputs.new_version }}
+          title: Release v${{ steps.bump_version.outputs.new_version }}
+          body: Release v${{ steps.bump_version.outputs.new_version }}.
+
+  release:
+    if: contains(fromJSON('["patch","minor","major"]'), inputs.package_strategy)
+    needs: bump
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: ${{ inputs.plugin_repo }}
+
+      - name: Checkout plugin repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: temporalio/${{ inputs.plugin_repo }}
+          ref: release/v${{ needs.bump.outputs.new_version }}
+          path: ${{ inputs.plugin_repo }}
+          fetch-depth: 0
+
+      - name: Merge PR
+        id: merge_pr
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: temporalio/${{ inputs.plugin_repo }}
+        run: |
+          set -euo pipefail
+          pr="${{ needs.bump.outputs.pull-request-number }}"
+          gh pr merge "$pr" --auto --squash || gh pr merge "$pr" --squash
+          while true; do
+            state="$(gh pr view "$pr" --json state --jq .state)"
+            case "$state" in
+              MERGED) exit 0 ;;
+              CLOSED)
+                echo "PR #$pr closed without merging" >&2
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+
+      - name: Tag new release
+        working-directory: ${{ inputs.plugin_repo }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: temporalio/${{ inputs.plugin_repo }}
+        run: |
+          set -euo pipefail
+          sha="$(gh pr view "${{ needs.bump.outputs.pull-request-number }}" --json mergeCommit --jq .mergeCommit.oid)"
+          git fetch origin "$sha"
+          git tag "v${{ needs.bump.outputs.new_version }}" "$sha"
+          git push origin "v${{ needs.bump.outputs.new_version }}"
+
+      - name: Summarize PR
+        if: success() && needs.bump.outputs.pull-request-url != ''
+        run: |
+          set -euo pipefail
+          {
+            echo "## Merged release PR — \`${{ inputs.plugin_repo }}\` v${{ needs.bump.outputs.new_version }}"
+            echo ""
+            echo "[#${{ needs.bump.outputs.pull-request-number }}](${{ needs.bump.outputs.pull-request-url }})"
+          } >> "$GITHUB_STEP_SUMMARY"
