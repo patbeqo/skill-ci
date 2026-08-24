@@ -23,104 +23,38 @@ permissions:
   contents: read
 
 jobs:
-  bump_skills:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        skill_repo: [skill-temporal-cloud-setup, skill-temporal-developer, skill-temporal-ops, skill-temporal-serverless]
-    env:
-      PACKAGE_STRATEGY: ${{ inputs[format('{0}_package_strategy', matrix.skill_repo)] }}
+  cloud_setup:
+    name: Release skill-temporal-cloud-setup
+    if: contains(fromJSON('["patch", "minor", "major"]'), inputs['skill-temporal-cloud-setup_package_strategy'])
+    uses: ./.github/workflows/plugin-release-skill.yml
+    with:
+      skill_repo: skill-temporal-cloud-setup
+      package_strategy: ${{ inputs['skill-temporal-cloud-setup_package_strategy'] }}
+    secrets: inherit
 
-    if: env.PACKAGE_STRATEGY == 'patch' || env.PACKAGE_STRATEGY == 'minor' || env.PACKAGE_STRATEGY == 'major'
+  developer:
+    name: Release skill-temporal-developer
+    if: contains(fromJSON('["patch", "minor", "major"]'), inputs['skill-temporal-developer_package_strategy'])
+    uses: ./.github/workflows/plugin-release-skill.yml
+    with:
+      skill_repo: skill-temporal-developer
+      package_strategy: ${{ inputs['skill-temporal-developer_package_strategy'] }}
+    secrets: inherit
 
-    steps:
-      - name: Checkout skill-ci repo
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+  ops:
+    name: Release skill-temporal-ops
+    if: contains(fromJSON('["patch", "minor", "major"]'), inputs['skill-temporal-ops_package_strategy'])
+    uses: ./.github/workflows/plugin-release-skill.yml
+    with:
+      skill_repo: skill-temporal-ops
+      package_strategy: ${{ inputs['skill-temporal-ops_package_strategy'] }}
+    secrets: inherit
 
-      - name: Generate token from GitHub App
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.APP_CLIENT_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-
-      - name: Checkout skill repo
-        uses: actions/checkout@v4
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          repository: patbeqo/${{ matrix.skill_repo }}
-          path: ${{ matrix.skill_repo }}
-          fetch-depth: 0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          enable-cache: true
-
-      - name: Get current tag
-        id: get_current_tag
-        working-directory: ${{ matrix.skill_repo }}
-        run: |
-          if [[ -z "$(git tag --list)" ]]; then
-            tag=v0.0.0
-          else
-            tag=$(git describe --tags --exact-match)
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Bump version
-        id: bump_version
-        run: |
-          new_version=$(uv run bump_version.py "${{ matrix.skill_repo }}/SKILL.md" "${{ steps.get_current_tag.outputs.tag }}" "$PACKAGE_STRATEGY")
-          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
-
-      - name: Create PR
-        id: create_pr
-        uses: peter-evans/create-pull-request@v8
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          path: ${{ matrix.skill_repo }}
-          add-paths: SKILL.md
-          branch: release/v${{ steps.bump_version.outputs.new_version }}
-          base: main
-          commit-message: Release v${{ steps.bump_version.outputs.new_version }}
-          title: Release v${{ steps.bump_version.outputs.new_version }}
-          body: Release v${{ steps.bump_version.outputs.new_version }}.
-
-      - name: Merge PR
-        id: merge_pr
-        timeout-minutes: 30
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: patbeqo/${{ matrix.skill_repo }}
-        run: |
-          set -euo pipefail
-          pr="${{ steps.create_pr.outputs.pull-request-number }}"
-          gh pr merge "$pr" --auto --squash
-          while true; do
-            state="$(gh pr view "$pr" --json state --jq .state)"
-            case "$state" in
-              MERGED) exit 0 ;;
-              CLOSED)
-                echo "PR #$pr closed without merging" >&2
-                exit 1
-                ;;
-            esac
-            sleep 10
-          done
-
-      - name: Tag new release
-        working-directory: ${{ matrix.skill_repo }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: patbeqo/${{ matrix.skill_repo }}
-          NEW_VERSION: ${{ steps.bump_version.outputs.new_version }}
-        run: |
-          set -euo pipefail
-          sha="$(gh pr view "${{ steps.create_pr.outputs.pull-request-number }}" --json mergeCommit --jq .mergeCommit.oid)"
-          git fetch origin "$sha"
-          git tag "v${NEW_VERSION}" "$sha"
-          git push origin "v${NEW_VERSION}"
+  serverless:
+    name: Release skill-temporal-serverless
+    if: contains(fromJSON('["patch", "minor", "major"]'), inputs['skill-temporal-serverless_package_strategy'])
+    uses: ./.github/workflows/plugin-release-skill.yml
+    with:
+      skill_repo: skill-temporal-serverless
+      package_strategy: ${{ inputs['skill-temporal-serverless_package_strategy'] }}
+    secrets: inherit
