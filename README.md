@@ -27,10 +27,9 @@ Plugins:
 
 When syncing content between the skills and the plugins the following nodes are checked out:
 - `SKILL.md`
-- `agents` <- This is dropped from the Cursor and Claude plugins
 - `references`
 - `scripts`
-- `assets` 
+- `assets`
 
 The content is then placed in the following locations:
 
@@ -49,7 +48,9 @@ The app needs **Contents (write)** and **Pull Requests (write)** permissions.
 ## How to add a new skill repo
 
 1. Install the GitHub App on the new skill repo with Contents (write) and Pull Requests (write).
-2. Update the GitHub Actions workflow with the new skill repo. In [`.github/workflows/plugin-release.yml`](.github/workflows/plugin-release.yml) add new inputs and append to the matrix. In [`.github/workflows/bump-plugin.yml`](.github/workflows/bump-plugin.yml) append to the matrix.
+2. In [`.github/workflows/plugin-release.yml`](.github/workflows/plugin-release.yml) add the new inputs, then append the repo to all skill matrices.
+3. In [`.github/workflows/bump-plugin.yml`](.github/workflows/bump-plugin.yml) add a named `download-artifact` step into that skill's dest folder.
+
 
 ```yaml
 skill-temporal-example_package_strategy: *skill_package_strategy

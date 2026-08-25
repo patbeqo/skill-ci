@@ -30,6 +30,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: plugin-release
+  cancel-in-progress: false
+
 jobs:
   bump_skills:
     strategy:
@@ -42,9 +46,21 @@ jobs:
       skill_repo: ${{ matrix.skill_repo }}
       package_strategy: ${{ inputs[format('{0}_package_strategy', matrix.skill_repo)] }}
 
-  bump_plugins:
+  fetch_skills:
     needs: bump_skills
-    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: true
+      matrix:
+        skill_repo: [skill-temporal-cloud-setup, skill-temporal-developer, skill-temporal-ops, skill-temporal-serverless]
+    uses: ./.github/workflows/fetch-skill.yml
+    secrets: inherit
+    with:
+      skill_repo: ${{ matrix.skill_repo }}
+      package_strategy: ${{ inputs[format('{0}_package_strategy', matrix.skill_repo)] }}
+      rollback_version: ${{ inputs[format('{0}_rollback_version', matrix.skill_repo)] }}
+
+  bump_plugins:
+    needs: fetch_skills
     strategy:
       fail-fast: false
       matrix:
