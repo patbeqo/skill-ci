@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ steps.app-token.outputs.token }}
-          repository: temporalio/${{ inputs.skill_repo }}
+          repository: patbeqo/${{ inputs.skill_repo }}
           path: ${{ inputs.skill_repo }}
           fetch-depth: 0
 
@@ -85,7 +85,7 @@ jobs:
         timeout-minutes: 10
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: temporalio/${{ inputs.skill_repo }}
+          GH_REPO: patbeqo/${{ inputs.skill_repo }}
           PR: ${{ steps.create_pr.outputs.pull-request-number }}
         run: |
           set -euo pipefail
@@ -111,7 +111,7 @@ jobs:
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           token: ${{ steps.app-token.outputs.token }}
-          repository: temporalio/${{ inputs.skill_repo }}
+          repository: patbeqo/${{ inputs.skill_repo }}
           tag_name: v${{ steps.bump_version.outputs.new_version }}
           name: v${{ steps.bump_version.outputs.new_version }}
           target_commitish: ${{ steps.merge_pr.outputs.sha }}
