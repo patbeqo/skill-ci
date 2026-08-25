@@ -49,6 +49,7 @@ The app needs **Contents (write)** and **Pull Requests (write)** permissions.
 
 1. Install the GitHub App on the new skill repo with Contents (write) and Pull Requests (write).
 2. In [`.github/workflows/plugin-release.yml`](.github/workflows/plugin-release.yml) add the new inputs, then append the repo to all skill matrices.
+3. In [`.github/workflows/bump-plugin.yml`](.github/workflows/bump-plugin.yml) add a named `download-artifact` step into that skill's dest folder.
 
 
 ```yaml
