@@ -28,9 +28,10 @@ jobs:
     steps:
       - name: Resolve skill name
         id: skill
+        env:
+          SKILL_REPO: ${{ inputs.skill_repo }}
         run: |
-          name="${{ inputs.skill_repo }}"
-          echo "name=${name#skill-}" >> "$GITHUB_OUTPUT"
+          echo "name=${SKILL_REPO#skill-}" >> "$GITHUB_OUTPUT"
 
       - name: Generate token from GitHub App
         id: app-token
@@ -61,9 +62,10 @@ jobs:
         id: latest_release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SKILL_REPO: ${{ inputs.skill_repo }}
         run: |
           set -euo pipefail
-          ref=$(gh api "repos/temporalio/${{ inputs.skill_repo }}/releases/latest" --jq .tag_name)
+          ref=$(gh api "repos/temporalio/$SKILL_REPO/releases/latest" --jq .tag_name)
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Checkout skill at latest release

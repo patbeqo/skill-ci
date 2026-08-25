@@ -54,9 +54,17 @@ jobs:
         id: get_current_tag
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SKILL_REPO: ${{ inputs.skill_repo }}
         run: |
           set -euo pipefail
-          tag=$(gh api "repos/temporalio/${{ inputs.skill_repo }}/releases/latest" --jq .tag_name) || tag=v0.0.0
+          if tag="$(gh api "repos/temporalio/$SKILL_REPO/releases/latest" --jq .tag_name 2>&1)"; then
+            :
+          elif [[ "$tag" == *"(HTTP 404)"* ]]; then
+            tag=v0.0.0
+          else
+            echo "$tag" >&2
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Bump version
