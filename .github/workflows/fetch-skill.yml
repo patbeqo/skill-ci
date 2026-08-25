@@ -33,6 +33,24 @@ jobs:
         run: |
           echo "name=${SKILL_REPO#skill-}" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout skill-ci repo
+        if: ${{ inputs.package_strategy == 'rollback' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        if: ${{ inputs.package_strategy == 'rollback' }}
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Validate rollback version
+        if: ${{ inputs.package_strategy == 'rollback' }}
+        env:
+          ROLLBACK_VERSION: ${{ inputs.rollback_version }}
+        run: uv run validate_rollback_version.py "$ROLLBACK_VERSION"
+
       - name: Generate token from GitHub App
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
