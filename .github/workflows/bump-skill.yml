@@ -102,7 +102,10 @@ jobs:
           HEAD_SHA: ${{ steps.create_pr.outputs.pull-request-head-sha }}
         run: |
           set -euo pipefail
-          gh pr checks "$PR" --watch --fail-fast
+          checks_output="$(gh pr checks "$PR" --watch --fail-fast 2>&1)" || {
+            echo "$checks_output"
+            [[ "$checks_output" == *"no checks reported"* ]]
+          }
           gh pr merge "$PR" --admin --squash --match-head-commit "$HEAD_SHA"
           echo "sha=$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
