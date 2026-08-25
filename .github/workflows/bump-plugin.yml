@@ -102,6 +102,22 @@ jobs:
         with:
           path: ${{ inputs.plugin_repo }}/${{ inputs.plugin_repo == 'codex-temporal-plugin' && 'plugins/temporal/skills' || 'skills' }}
 
+      - name: Extract skill overlays
+        working-directory: ${{ inputs.plugin_repo }}
+        env:
+          DEST: ${{ inputs.plugin_repo == 'codex-temporal-plugin' && 'plugins/temporal/skills' || 'skills' }}
+        run: |
+          set -euo pipefail
+          for skill_dir in "$DEST"/*; do
+            archive="$skill_dir/overlay.tar"
+            if [[ ! -f "$archive" ]]; then
+              echo "Missing skill overlay archive: $archive" >&2
+              exit 1
+            fi
+            tar -xf "$archive" -C "$skill_dir"
+            rm "$archive"
+          done
+
       - name: Create PR
         id: create_pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
