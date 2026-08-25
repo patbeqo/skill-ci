@@ -141,25 +141,33 @@ jobs:
 
       - name: Resolve plugin.json
         id: plugin_json
+        env:
+          PLUGIN_REPO: ${{ inputs.plugin_repo }}
         run: |
           set -euo pipefail
-          case "${{ inputs.plugin_repo }}" in
+          case "$PLUGIN_REPO" in
             cursor-temporal-plugin) rel=".cursor-plugin/plugin.json" ;;
             claude-temporal-plugin) rel=".claude-plugin/plugin.json" ;;
             codex-temporal-plugin) rel="plugins/temporal/.codex-plugin/plugin.json" ;;
-            *) echo "Unknown plugin repo ${{ inputs.plugin_repo }}" >&2; exit 1 ;;
+            *) echo "Unknown plugin repo $PLUGIN_REPO" >&2; exit 1 ;;
           esac
-          echo "path=${{ inputs.plugin_repo }}/$rel" >> "$GITHUB_OUTPUT"
+          echo "path=${PLUGIN_REPO}/${rel}" >> "$GITHUB_OUTPUT"
 
       - name: Bump version
         id: bump_version
+        env:
+          PLUGIN_JSON_PATH: ${{ steps.plugin_json.outputs.path }}
+          CURRENT_TAG: ${{ steps.get_current_tag.outputs.tag }}
+          PACKAGE_STRATEGY: ${{ inputs.package_strategy }}
         run: |
-          new_version=$(uv run bump_version.py "${{ steps.plugin_json.outputs.path }}" "${{ steps.get_current_tag.outputs.tag }}" "${{ inputs.package_strategy }}")
+          new_version=$(uv run bump_version.py "$PLUGIN_JSON_PATH" "$CURRENT_TAG" "$PACKAGE_STRATEGY")
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
       - name: Clear skill destinations
         working-directory: ${{ inputs.plugin_repo }}
-        run: rm -rf "${{ inputs.plugin_repo == 'codex-temporal-plugin' && 'plugins/temporal/skills' || 'skills' }}"
+        env:
+          DEST: ${{ inputs.plugin_repo == 'codex-temporal-plugin' && 'plugins/temporal/skills' || 'skills' }}
+        run: rm -rf "$DEST"
 
       - name: Download skill overlays
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -197,55 +205,57 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           repositories: ${{ inputs.plugin_repo }}
 
-      - name: Checkout plugin repo
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          repository: temporalio/${{ inputs.plugin_repo }}
-          ref: release/v${{ needs.bump.outputs.new_version }}
-          path: ${{ inputs.plugin_repo }}
-          fetch-depth: 0
-
       - name: Merge PR
         id: merge_pr
         timeout-minutes: 10
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: temporalio/${{ inputs.plugin_repo }}
+          PR: ${{ needs.bump.outputs.pull-request-number }}
         run: |
           set -euo pipefail
-          pr="${{ needs.bump.outputs.pull-request-number }}"
-          gh pr merge "$pr" --auto --squash || gh pr merge "$pr" --squash
+          gh pr merge "$PR" --auto --squash || gh pr merge "$PR" --squash
           while true; do
-            state="$(gh pr view "$pr" --json state --jq .state)"
+            state="$(gh pr view "$PR" --json state --jq .state)"
             case "$state" in
-              MERGED) exit 0 ;;
+              MERGED)
+                sha="$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)"
+                echo "sha=$sha" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
               CLOSED)
-                echo "PR #$pr closed without merging" >&2
+                echo "PR #$PR closed without merging" >&2
                 exit 1
                 ;;
             esac
             sleep 10
           done
 
-      - name: Tag new release
-        working-directory: ${{ inputs.plugin_repo }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: temporalio/${{ inputs.plugin_repo }}
-        run: |
-          set -euo pipefail
-          sha="$(gh pr view "${{ needs.bump.outputs.pull-request-number }}" --json mergeCommit --jq .mergeCommit.oid)"
-          git fetch origin "$sha"
-          git tag "v${{ needs.bump.outputs.new_version }}" "$sha"
-          git push origin "v${{ needs.bump.outputs.new_version }}"
+      - name: Create release
+        id: create_release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: temporalio/${{ inputs.plugin_repo }}
+          tag_name: v${{ needs.bump.outputs.new_version }}
+          name: v${{ needs.bump.outputs.new_version }}
+          target_commitish: ${{ steps.merge_pr.outputs.sha }}
+          generate_release_notes: true
 
       - name: Summarize PR
         if: success() && needs.bump.outputs.pull-request-url != ''
+        env:
+          PLUGIN_REPO: ${{ inputs.plugin_repo }}
+          NEW_VERSION: ${{ needs.bump.outputs.new_version }}
+          PR_NUMBER: ${{ needs.bump.outputs.pull-request-number }}
+          PR_URL: ${{ needs.bump.outputs.pull-request-url }}
+          RELEASE_URL: ${{ steps.create_release.outputs.url }}
         run: |
           set -euo pipefail
           {
-            echo "## Merged release PR — \`${{ inputs.plugin_repo }}\` v${{ needs.bump.outputs.new_version }}"
+            echo "## Merged release PR — \`${PLUGIN_REPO}\` v${NEW_VERSION}"
             echo ""
-            echo "[#${{ needs.bump.outputs.pull-request-number }}](${{ needs.bump.outputs.pull-request-url }})"
+            echo "[#${PR_NUMBER}](${PR_URL})"
+            echo ""
+            echo "${RELEASE_URL}"
           } >> "$GITHUB_STEP_SUMMARY"
