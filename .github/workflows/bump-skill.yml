@@ -92,14 +92,6 @@ jobs:
 
       - name: Merge PR
         if: steps.create_pr.outputs.pull-request-number != ''
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: patbeqo/${{ inputs.skill_repo }}
-          PR: ${{ steps.create_pr.outputs.pull-request-number }}
-        run: gh pr merge "$PR" --auto --squash || gh pr merge "$PR" --squash
-
-      - name: Wait for merge
-        if: steps.create_pr.outputs.pull-request-number != ''
         id: merge_pr
         timeout-minutes: 10
         env:
@@ -107,24 +99,14 @@ jobs:
           GH_REPO: patbeqo/${{ inputs.skill_repo }}
           PR: ${{ steps.create_pr.outputs.pull-request-number }}
           PR_URL: ${{ steps.create_pr.outputs.pull-request-url }}
+          HEAD_SHA: ${{ steps.create_pr.outputs.pull-request-head-sha }}
         run: |
           set -euo pipefail
-          while true; do
-            state="$(gh pr view "$PR" --json state --jq .state)"
-            case "$state" in
-              MERGED)
-                echo "sha=$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
-                echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
-                echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-                exit 0
-                ;;
-              CLOSED)
-                echo "PR #$PR closed without merging" >&2
-                exit 1
-                ;;
-            esac
-            sleep 10
-          done
+          gh pr checks "$PR" --watch --fail-fast
+          gh pr merge "$PR" --admin --squash --match-head-commit "$HEAD_SHA"
+          echo "sha=$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       - name: Create release
         id: create_release
