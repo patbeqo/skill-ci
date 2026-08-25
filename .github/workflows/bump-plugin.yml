@@ -19,91 +19,9 @@ permissions:
   contents: read
 
 jobs:
-  overlay:
-    if: contains(fromJSON('["patch","minor","major"]'), inputs.package_strategy)
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        skill_repo: [skill-temporal-cloud-setup, skill-temporal-developer, skill-temporal-ops, skill-temporal-serverless]
-
-    steps:
-      - name: Resolve skill name
-        id: skill
-        run: |
-          name="${{ matrix.skill_repo }}"
-          echo "name=${name#skill-}" >> "$GITHUB_OUTPUT"
-
-      - name: Generate token from GitHub App
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.APP_CLIENT_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          repositories: ${{ matrix.skill_repo }}
-
-      - name: Checkout skill at rollback tag
-        if: ${{ github.event.inputs[format('{0}_package_strategy', matrix.skill_repo)] == 'rollback' }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          repository: patbeqo/${{ matrix.skill_repo }}
-          ref: v${{ github.event.inputs[format('{0}_rollback_version', matrix.skill_repo)] }}
-          path: overlay
-          persist-credentials: false
-          sparse-checkout: |
-            SKILL.md
-            agents
-            references
-            scripts
-            assets
-          sparse-checkout-cone-mode: false
-
-      - name: Resolve latest skill tag
-        if: ${{ github.event.inputs[format('{0}_package_strategy', matrix.skill_repo)] != 'rollback' }}
-        id: latest_tag
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          ref=$(gh api --paginate "repos/patbeqo/${{ matrix.skill_repo }}/tags" --jq '.[].name' | sort -V | tail -1)
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout skill at latest tag
-        if: ${{ github.event.inputs[format('{0}_package_strategy', matrix.skill_repo)] != 'rollback' }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          repository: patbeqo/${{ matrix.skill_repo }}
-          ref: ${{ steps.latest_tag.outputs.ref }}
-          path: overlay
-          persist-credentials: false
-          sparse-checkout: |
-            SKILL.md
-            agents
-            references
-            scripts
-            assets
-          sparse-checkout-cone-mode: false
-
-      - name: Drop nested git metadata
-        run: rm -rf overlay/.git
-
-      - name: Upload skill overlay
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ steps.skill.outputs.name }}
-          path: overlay
-          if-no-files-found: error
-          retention-days: 1
-
   bump:
     if: contains(fromJSON('["patch","minor","major"]'), inputs.package_strategy)
-    needs: overlay
     runs-on: ubuntu-latest
-    outputs:
-      new_version: ${{ steps.bump_version.outputs.new_version }}
-      pull-request-number: ${{ steps.create_pr.outputs.pull-request-number }}
-      pull-request-url: ${{ steps.create_pr.outputs.pull-request-url }}
 
     steps:
       - name: Checkout skill-ci repo
@@ -132,12 +50,14 @@ jobs:
         with:
           enable-cache: false
 
-      - name: Get current tag
+      - name: Get current release
         id: get_current_tag
-        working-directory: ${{ inputs.plugin_repo }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          tag=$(git tag --sort=v:refname | tail -1)
-          echo "tag=${tag:-v0.0.0}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          tag=$(gh api "repos/patbeqo/${{ inputs.plugin_repo }}/releases/latest" --jq .tag_name) || tag=v0.0.0
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Resolve plugin.json
         id: plugin_json
@@ -174,11 +94,6 @@ jobs:
         with:
           path: ${{ inputs.plugin_repo }}/${{ inputs.plugin_repo == 'codex-temporal-plugin' && 'plugins/temporal/skills' || 'skills' }}
 
-      - name: Omit Codex agent file
-        if: ${{ inputs.plugin_repo != 'codex-temporal-plugin' }}
-        working-directory: ${{ inputs.plugin_repo }}
-        run: rm -f skills/*/agents/openai.yaml
-
       - name: Create PR
         id: create_pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
@@ -191,36 +106,32 @@ jobs:
           title: Release v${{ steps.bump_version.outputs.new_version }}
           body: Release v${{ steps.bump_version.outputs.new_version }}.
 
-  release:
-    if: contains(fromJSON('["patch","minor","major"]'), inputs.package_strategy)
-    needs: bump
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Generate token from GitHub App
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.APP_CLIENT_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          repositories: ${{ inputs.plugin_repo }}
-
       - name: Merge PR
+        if: steps.create_pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: patbeqo/${{ inputs.plugin_repo }}
+          PR: ${{ steps.create_pr.outputs.pull-request-number }}
+        run: gh pr merge "$PR" --auto --squash || gh pr merge "$PR" --squash
+
+      - name: Wait for merge
+        if: steps.create_pr.outputs.pull-request-number != ''
         id: merge_pr
         timeout-minutes: 10
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: patbeqo/${{ inputs.plugin_repo }}
-          PR: ${{ needs.bump.outputs.pull-request-number }}
+          PR: ${{ steps.create_pr.outputs.pull-request-number }}
+          PR_URL: ${{ steps.create_pr.outputs.pull-request-url }}
         run: |
           set -euo pipefail
-          gh pr merge "$PR" --auto --squash || gh pr merge "$PR" --squash
           while true; do
             state="$(gh pr view "$PR" --json state --jq .state)"
             case "$state" in
               MERGED)
-                sha="$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)"
-                echo "sha=$sha" >> "$GITHUB_OUTPUT"
+                echo "sha=$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
+                echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
+                echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
               CLOSED)
@@ -237,25 +148,26 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           repository: patbeqo/${{ inputs.plugin_repo }}
-          tag_name: v${{ needs.bump.outputs.new_version }}
-          name: v${{ needs.bump.outputs.new_version }}
-          target_commitish: ${{ steps.merge_pr.outputs.sha }}
+          tag_name: v${{ steps.bump_version.outputs.new_version }}
+          name: v${{ steps.bump_version.outputs.new_version }}
+          target_commitish: ${{ steps.merge_pr.outputs.sha || 'main' }}
           generate_release_notes: true
 
       - name: Summarize PR
-        if: success() && needs.bump.outputs.pull-request-url != ''
         env:
           PLUGIN_REPO: ${{ inputs.plugin_repo }}
-          NEW_VERSION: ${{ needs.bump.outputs.new_version }}
-          PR_NUMBER: ${{ needs.bump.outputs.pull-request-number }}
-          PR_URL: ${{ needs.bump.outputs.pull-request-url }}
+          NEW_VERSION: ${{ steps.bump_version.outputs.new_version }}
+          PR_NUMBER: ${{ steps.merge_pr.outputs.pr_number }}
+          PR_URL: ${{ steps.merge_pr.outputs.pr_url }}
           RELEASE_URL: ${{ steps.create_release.outputs.url }}
         run: |
           set -euo pipefail
           {
             echo "## Merged release PR — \`${PLUGIN_REPO}\` v${NEW_VERSION}"
             echo ""
-            echo "[#${PR_NUMBER}](${PR_URL})"
-            echo ""
+            if [ -n "$PR_NUMBER" ]; then
+              echo "[#${PR_NUMBER}](${PR_URL})"
+              echo ""
+            fi
             echo "${RELEASE_URL}"
           } >> "$GITHUB_STEP_SUMMARY"

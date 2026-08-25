@@ -50,12 +50,14 @@ jobs:
         with:
           enable-cache: false
 
-      - name: Get current tag
+      - name: Get current release
         id: get_current_tag
-        working-directory: ${{ inputs.skill_repo }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          tag=$(git tag --sort=v:refname | tail -1)
-          echo "tag=${tag:-v0.0.0}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          tag=$(gh api "repos/patbeqo/${{ inputs.skill_repo }}/releases/latest" --jq .tag_name) || tag=v0.0.0
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Bump version
         id: bump_version
@@ -81,21 +83,31 @@ jobs:
           body: Release v${{ steps.bump_version.outputs.new_version }}.
 
       - name: Merge PR
+        if: steps.create_pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: patbeqo/${{ inputs.skill_repo }}
+          PR: ${{ steps.create_pr.outputs.pull-request-number }}
+        run: gh pr merge "$PR" --auto --squash || gh pr merge "$PR" --squash
+
+      - name: Wait for merge
+        if: steps.create_pr.outputs.pull-request-number != ''
         id: merge_pr
         timeout-minutes: 10
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: patbeqo/${{ inputs.skill_repo }}
           PR: ${{ steps.create_pr.outputs.pull-request-number }}
+          PR_URL: ${{ steps.create_pr.outputs.pull-request-url }}
         run: |
           set -euo pipefail
-          gh pr merge "$PR" --auto --squash || gh pr merge "$PR" --squash
           while true; do
             state="$(gh pr view "$PR" --json state --jq .state)"
             case "$state" in
               MERGED)
-                sha="$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)"
-                echo "sha=$sha" >> "$GITHUB_OUTPUT"
+                echo "sha=$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
+                echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
+                echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
               CLOSED)
@@ -114,23 +126,24 @@ jobs:
           repository: patbeqo/${{ inputs.skill_repo }}
           tag_name: v${{ steps.bump_version.outputs.new_version }}
           name: v${{ steps.bump_version.outputs.new_version }}
-          target_commitish: ${{ steps.merge_pr.outputs.sha }}
+          target_commitish: ${{ steps.merge_pr.outputs.sha || 'main' }}
           generate_release_notes: true
 
       - name: Summarize PR
-        if: success() && steps.create_pr.outputs.pull-request-url != ''
         env:
           SKILL_REPO: ${{ inputs.skill_repo }}
           NEW_VERSION: ${{ steps.bump_version.outputs.new_version }}
-          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
-          PR_URL: ${{ steps.create_pr.outputs.pull-request-url }}
+          PR_NUMBER: ${{ steps.merge_pr.outputs.pr_number }}
+          PR_URL: ${{ steps.merge_pr.outputs.pr_url }}
           RELEASE_URL: ${{ steps.create_release.outputs.url }}
         run: |
           set -euo pipefail
           {
             echo "## Merged release PR — \`${SKILL_REPO}\` v${NEW_VERSION}"
             echo ""
-            echo "[#${PR_NUMBER}](${PR_URL})"
-            echo ""
+            if [ -n "$PR_NUMBER" ]; then
+              echo "[#${PR_NUMBER}](${PR_URL})"
+              echo ""
+            fi
             echo "${RELEASE_URL}"
           } >> "$GITHUB_STEP_SUMMARY"
