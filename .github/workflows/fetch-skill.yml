@@ -49,7 +49,7 @@ jobs:
         if: ${{ inputs.package_strategy == 'rollback' }}
         env:
           ROLLBACK_VERSION: ${{ inputs.rollback_version }}
-        run: uv run validate_rollback_version.py "$ROLLBACK_VERSION"
+        run: uv run .github/scripts/validate_rollback_version.py "$ROLLBACK_VERSION"
 
       - name: Generate token from GitHub App
         id: app-token

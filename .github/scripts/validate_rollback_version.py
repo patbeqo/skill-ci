@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.14"
-# dependencies = [
-#     "semver>=3,<4",
-# ]
-# ///
 import argparse
 
 import semver

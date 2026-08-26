@@ -74,7 +74,7 @@ jobs:
           CURRENT_TAG: ${{ steps.get_current_tag.outputs.tag }}
           PACKAGE_STRATEGY: ${{ inputs.package_strategy }}
         run: |
-          new_version=$(uv run bump_version.py "$SKILL_REPO/SKILL.md" "$CURRENT_TAG" "$PACKAGE_STRATEGY")
+          new_version=$(uv run .github/scripts/bump_version.py "$SKILL_REPO/SKILL.md" "$CURRENT_TAG" "$PACKAGE_STRATEGY")
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
       - name: Create PR
