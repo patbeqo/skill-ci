@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.14"
-# dependencies = [
-#     "python-frontmatter>=1.3,<2",
-#     "semver>=3,<4",
-# ]
-# ///
 import argparse
 import json
 from pathlib import Path
